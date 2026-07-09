@@ -7,6 +7,8 @@ import type { SavedDate } from './types';
 import { db } from './firebase';
 import { collection, onSnapshot, doc, setDoc, deleteDoc, updateDoc, arrayUnion } from 'firebase/firestore';
 
+const STORAGE_KEY = 'mylove-dates';
+
 function App() {
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [dates, setDates] = useState<SavedDate[]>([]);
@@ -14,8 +16,27 @@ function App() {
   const [loading, setLoading] = useState(true);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
+  const saveDatesToStorage = (items: SavedDate[]) => {
+    if (typeof window !== 'undefined') {
+      window.localStorage.setItem(STORAGE_KEY, JSON.stringify(items));
+    }
+  };
+
+  const sortDates = (items: SavedDate[]) =>
+    [...items].sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
+
   // Cargar citas desde Firestore en tiempo real
   useEffect(() => {
+    try {
+      const storedDates = window.localStorage.getItem(STORAGE_KEY);
+      if (storedDates) {
+        const parsedDates = JSON.parse(storedDates) as SavedDate[];
+        setDates(sortDates(parsedDates));
+      }
+    } catch (error) {
+      console.warn('No se pudo leer el respaldo local:', error);
+    }
+
     const unsubscribe = onSnapshot(
       collection(db, 'dates'),
       (querySnapshot) => {
@@ -24,15 +45,18 @@ function App() {
           id: docSnapshot.id,
         }));
 
-        datesData.sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
-        setDates(datesData);
+        const sortedDates = sortDates(datesData);
+        setDates(sortedDates);
+        saveDatesToStorage(sortedDates);
         setErrorMessage(null);
         setLoading(false);
       },
       (error) => {
         console.error('Error cargando citas de Firestore: ', error);
         setLoading(false);
-        setErrorMessage(`No se pudo cargar el historial. Código: ${error.code || 'unknown'}`);
+        setErrorMessage(
+          `No se pudo cargar el historial. Código: ${error.code || 'unknown'}. Mensaje: ${error.message || 'sin descripción'}. Revisa las reglas de Firestore, App Check o la configuración del proyecto.`
+        );
       }
     );
 
@@ -40,32 +64,41 @@ function App() {
   }, []);
 
   const handleSaveDate = async (newDate: SavedDate) => {
+    const nextDates = (prevDates: SavedDate[]) => {
+      const exists = prevDates.some(d => d.id === newDate.id);
+      const updatedDates = exists
+        ? prevDates.map(d => d.id === newDate.id ? newDate : d)
+        : [newDate, ...prevDates];
+      return sortDates(updatedDates);
+    };
+
+    setDates(prevDates => {
+      const updatedDates = nextDates(prevDates);
+      saveDatesToStorage(updatedDates);
+      return updatedDates;
+    });
+
     try {
-      // Guardar o actualizar en Firestore
       await setDoc(doc(db, 'dates', newDate.id), { ...newDate, id: newDate.id });
-      
-      // Actualizar estado local
-      setDates(prevDates => {
-        const exists = prevDates.some(d => d.id === newDate.id);
-        if (exists) {
-          return prevDates.map(d => d.id === newDate.id ? newDate : d);
-        }
-        return [newDate, ...prevDates].sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
-      });
     } catch (error) {
-      console.error("Error guardando cita: ", error);
-      alert("Hubo un error guardando la cita.");
+      console.error('Error guardando cita: ', error);
+      setErrorMessage('Se guardó localmente, pero Firestore no aceptó la escritura. Revisa permisos o configuración del proyecto.');
     }
   };
 
   const handleDeleteDate = async (id: string) => {
     if (window.confirm('¿Estás seguro de que quieres eliminar esta cita?')) {
+      setDates(prevDates => {
+        const updatedDates = prevDates.filter(d => d.id !== id);
+        saveDatesToStorage(updatedDates);
+        return updatedDates;
+      });
+
       try {
-        await deleteDoc(doc(db, "dates", id));
-        setDates(prevDates => prevDates.filter(d => d.id !== id));
+        await deleteDoc(doc(db, 'dates', id));
       } catch (error) {
-        console.error("Error eliminando cita: ", error);
-        alert("Hubo un error eliminando la cita.");
+        console.error('Error eliminando cita: ', error);
+        setErrorMessage('Se eliminó localmente, pero Firestore no aceptó la eliminación.');
       }
     }
   };
@@ -76,23 +109,25 @@ function App() {
   };
 
   const handlePhotosUpdated = async (dateId: string, newPhotoUrl: string) => {
-    try {
-      const dateRef = doc(db, "dates", dateId);
-      // Agregar la URL de la foto al array 'photos' en Firestore
-      await updateDoc(dateRef, {
-        photos: arrayUnion(newPhotoUrl)
-      });
-      
-      // Actualizar estado local
-      setDates(prevDates => prevDates.map(d => {
+    setDates(prevDates => {
+      const updatedDates = prevDates.map(d => {
         if (d.id === dateId) {
           return { ...d, photos: [...(d.photos || []), newPhotoUrl] };
         }
         return d;
-      }));
+      });
+      saveDatesToStorage(updatedDates);
+      return updatedDates;
+    });
+
+    try {
+      const dateRef = doc(db, 'dates', dateId);
+      await updateDoc(dateRef, {
+        photos: arrayUnion(newPhotoUrl)
+      });
     } catch (error) {
-      console.error("Error actualizando fotos: ", error);
-      alert("Hubo un error al guardar la referencia de la foto.");
+      console.error('Error actualizando fotos: ', error);
+      setErrorMessage('La imagen se guardó localmente, pero Firestore no aceptó la referencia.');
     }
   };
 
