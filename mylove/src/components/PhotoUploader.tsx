@@ -14,6 +14,7 @@ export default function PhotoUploader({ dateId, onClose, onUploadSuccess }: Phot
   const [preview, setPreview] = useState<string | null>(null);
   const [uploading, setUploading] = useState(false);
   const [progress, setProgress] = useState(0);
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -32,6 +33,7 @@ export default function PhotoUploader({ dateId, onClose, onUploadSuccess }: Phot
     if (!file) return;
 
     setUploading(true);
+    setErrorMessage(null);
     // Create a unique file name to avoid overwriting
     const fileName = `${Date.now()}_${file.name}`;
     const storageRef = ref(storage, `dates/${dateId}/${fileName}`);
@@ -46,7 +48,7 @@ export default function PhotoUploader({ dateId, onClose, onUploadSuccess }: Phot
       (error) => {
         console.error('Error uploading file:', error);
         setUploading(false);
-        alert('Hubo un error al subir la foto.');
+        setErrorMessage(`No se pudo subir la imagen. Código: ${error.code || 'unknown'}`);
       },
       () => {
         getDownloadURL(uploadTask.snapshot.ref).then((downloadURL) => {
@@ -100,6 +102,12 @@ export default function PhotoUploader({ dateId, onClose, onUploadSuccess }: Phot
           ref={fileInputRef} 
           onChange={handleFileChange}
         />
+
+        {errorMessage && (
+          <div className="mt-4 rounded-xl border border-red-200 bg-red-50 p-3 text-sm text-red-700">
+            {errorMessage}
+          </div>
+        )}
 
         {uploading && (
           <div className="mt-4">
