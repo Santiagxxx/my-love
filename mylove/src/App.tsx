@@ -1,7 +1,6 @@
 import { useState, useEffect } from 'react';
 import './App.css';
 import DateForm from './components/DateForm';
-import Countdown from './components/Countdown';
 import DateList from './components/DateList';
 import { HeartHandshake } from 'lucide-react';
 import type { SavedDate } from './types';
@@ -13,6 +12,7 @@ function App() {
   const [dates, setDates] = useState<SavedDate[]>([]);
   const [editingDate, setEditingDate] = useState<SavedDate | null>(null);
   const [loading, setLoading] = useState(true);
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
   // Cargar citas desde Firestore en tiempo real
   useEffect(() => {
@@ -26,12 +26,13 @@ function App() {
 
         datesData.sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
         setDates(datesData);
+        setErrorMessage(null);
         setLoading(false);
       },
       (error) => {
         console.error('Error cargando citas de Firestore: ', error);
         setLoading(false);
-        alert('Hubo un error cargando el historial. Revisa las reglas de Firestore y la conexión.');
+        setErrorMessage(`No se pudo cargar el historial. Código: ${error.code || 'unknown'}`);
       }
     );
 
@@ -123,11 +124,16 @@ function App() {
 
       {/* Main Content */}
       <main className="container mx-auto px-4 mt-8 max-w-5xl">
+        {errorMessage && (
+          <div className="mb-6 rounded-2xl border border-red-200 bg-red-50 p-4 text-sm text-red-700">
+            {errorMessage}
+          </div>
+        )}
+
         <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
           
           {/* Left Column */}
           <div className="space-y-8">
-            <Countdown />
             <DateList 
               dates={dates} 
               onEdit={handleEditDate} 
