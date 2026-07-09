@@ -2,12 +2,11 @@ import { useState, useEffect } from 'react';
 import './App.css';
 import DateForm from './components/DateForm';
 import Countdown from './components/Countdown';
-import LoveNotes from './components/LoveNotes';
 import DateList from './components/DateList';
 import { HeartHandshake } from 'lucide-react';
 import type { SavedDate } from './types';
 import { db } from './firebase';
-import { collection, getDocs, doc, setDoc, deleteDoc, updateDoc, arrayUnion } from 'firebase/firestore';
+import { collection, onSnapshot, doc, setDoc, deleteDoc, updateDoc, arrayUnion } from 'firebase/firestore';
 
 function App() {
   const [isModalOpen, setIsModalOpen] = useState(false);
@@ -15,33 +14,34 @@ function App() {
   const [editingDate, setEditingDate] = useState<SavedDate | null>(null);
   const [loading, setLoading] = useState(true);
 
-  // Cargar citas desde Firestore
+  // Cargar citas desde Firestore en tiempo real
   useEffect(() => {
-    const fetchDates = async () => {
-      try {
-        const querySnapshot = await getDocs(collection(db, "dates"));
-        const datesData: SavedDate[] = [];
-        querySnapshot.forEach((doc) => {
-          datesData.push(doc.data() as SavedDate);
-        });
-        
-        // Ordenar por fecha (las más recientes primero, o como prefieras)
+    const unsubscribe = onSnapshot(
+      collection(db, 'dates'),
+      (querySnapshot) => {
+        const datesData: SavedDate[] = querySnapshot.docs.map((docSnapshot) => ({
+          ...(docSnapshot.data() as SavedDate),
+          id: docSnapshot.id,
+        }));
+
         datesData.sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
         setDates(datesData);
-      } catch (error) {
-        console.error("Error cargando citas de Firestore: ", error);
-        alert("Hubo un error cargando el historial.");
-      } finally {
         setLoading(false);
+      },
+      (error) => {
+        console.error('Error cargando citas de Firestore: ', error);
+        setLoading(false);
+        alert('Hubo un error cargando el historial. Revisa las reglas de Firestore y la conexión.');
       }
-    };
-    fetchDates();
+    );
+
+    return () => unsubscribe();
   }, []);
 
   const handleSaveDate = async (newDate: SavedDate) => {
     try {
       // Guardar o actualizar en Firestore
-      await setDoc(doc(db, "dates", newDate.id), newDate);
+      await setDoc(doc(db, 'dates', newDate.id), { ...newDate, id: newDate.id });
       
       // Actualizar estado local
       setDates(prevDates => {
@@ -127,7 +127,6 @@ function App() {
           
           {/* Left Column */}
           <div className="space-y-8">
-            <LoveNotes />
             <Countdown />
             <DateList 
               dates={dates} 
