@@ -4,4 +4,7 @@ export interface SavedDate {
   activityName: string;
   date: string;
   photos?: string[];
+  completed?: boolean;
+  completedAt?: string | null;
+  notes?: string;
 }
