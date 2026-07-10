@@ -1,6 +1,5 @@
 import { useRef, useState } from 'react';
-import { getDownloadURL, ref, uploadBytesResumable } from 'firebase/storage';
-import { ensureAuthenticated, storage } from '../firebase';
+import { ensureAuthenticated } from '../firebase';
 import { ImagePlus, Loader2, Trash2, X } from 'lucide-react';
 
 interface PhotoUploaderProps {
@@ -33,14 +32,10 @@ function getFriendlyError(error: unknown): string {
   }
 
   if (code === 'permission-denied') {
-    return 'Firestore rechazó el respaldo de la imagen. Publica las reglas incluidas en el proyecto.';
+    return 'Firestore rechazó la imagen. Publica las reglas incluidas en el proyecto.';
   }
 
   return `No se pudieron guardar las imágenes. Código: ${code}. ${message}`;
-}
-
-function sanitizeFileName(fileName: string): string {
-  return fileName.replace(/[^a-zA-Z0-9._-]/g, '_');
 }
 
 function loadImage(file: File): Promise<HTMLImageElement> {
@@ -126,7 +121,7 @@ async function compressImageForFirestore(file: File): Promise<string> {
   );
 }
 
-export default function PhotoUploader({ dateId, onClose, onUploadSuccess }: PhotoUploaderProps) {
+export default function PhotoUploader({ dateId: _dateId, onClose, onUploadSuccess }: PhotoUploaderProps) {
   const [files, setFiles] = useState<File[]>([]);
   const [uploading, setUploading] = useState(false);
   const [progress, setProgress] = useState(0);
@@ -164,66 +159,28 @@ export default function PhotoUploader({ dateId, onClose, onUploadSuccess }: Phot
     setFiles((currentFiles) => currentFiles.filter((_, index) => index !== indexToRemove));
   };
 
-  const uploadFileToStorage = (file: File, index: number, totalFiles: number): Promise<string> =>
-    new Promise((resolve, reject) => {
-      const randomId =
-        typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
-          ? crypto.randomUUID()
-          : Math.random().toString(36).slice(2);
-      const fileName = `${Date.now()}_${randomId}_${sanitizeFileName(file.name)}`;
-      const storageRef = ref(storage, `dates/${dateId}/${fileName}`);
-      const uploadTask = uploadBytesResumable(storageRef, file, { contentType: file.type });
-
-      uploadTask.on(
-        'state_changed',
-        (snapshot) => {
-          const fileProgress = snapshot.totalBytes
-            ? snapshot.bytesTransferred / snapshot.totalBytes
-            : 0;
-          setProgress(((index + fileProgress) / totalFiles) * 100);
-        },
-        reject,
-        async () => {
-          try {
-            resolve(await getDownloadURL(uploadTask.snapshot.ref));
-          } catch (error) {
-            reject(error);
-          }
-        }
-      );
-    });
-
   const handleUpload = async () => {
     if (files.length === 0) {
       return;
     }
 
     setUploading(true);
-    setProgress(0);
+    setProgress(5);
     setErrorMessage(null);
 
     try {
       await ensureAuthenticated();
-      const urls: string[] = [];
+      const optimizedPhotos: string[] = [];
 
       for (let index = 0; index < files.length; index += 1) {
-        const file = files[index];
-
-        try {
-          urls.push(await uploadFileToStorage(file, index, files.length));
-        } catch (storageError) {
-          console.warn(
-            'Firebase Storage no está disponible; se usará el respaldo optimizado en Firestore:',
-            storageError
-          );
-          setProgress(((index + 0.5) / files.length) * 100);
-          urls.push(await compressImageForFirestore(file));
-        }
-
-        setProgress(((index + 1) / files.length) * 100);
+        setProgress(((index + 0.2) / files.length) * 85);
+        optimizedPhotos.push(await compressImageForFirestore(files[index]));
+        setProgress(((index + 1) / files.length) * 85);
       }
 
-      await onUploadSuccess(urls);
+      setProgress(90);
+      await onUploadSuccess(optimizedPhotos);
+      setProgress(100);
       onClose();
     } catch (error) {
       console.error('Error saving files:', error);
