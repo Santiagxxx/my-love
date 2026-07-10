@@ -10,6 +10,8 @@ interface PhotoUploaderProps {
 }
 
 const MAX_FILE_SIZE = 10 * 1024 * 1024;
+const MAX_IMAGE_DIMENSION = 1600;
+const MAX_INLINE_DATA_URL_LENGTH = 700_000;
 
 function getErrorDetails(error: unknown): { code: string; message: string } {
   if (error && typeof error === 'object') {
@@ -27,18 +29,101 @@ function getFriendlyError(error: unknown): string {
   const { code, message } = getErrorDetails(error);
 
   if (code === 'auth/operation-not-allowed') {
-    return 'Debes habilitar el proveedor Anónimo en Firebase Authentication antes de subir imágenes.';
+    return 'Debes habilitar el proveedor Anónimo en Firebase Authentication antes de guardar imágenes.';
   }
 
-  if (code === 'storage/unauthorized') {
-    return 'Firebase rechazó la carga. Publica las reglas de Storage incluidas en el proyecto y verifica que la sesión anónima esté habilitada.';
+  if (code === 'permission-denied') {
+    return 'Firestore rechazó el respaldo de la imagen. Publica las reglas incluidas en el proyecto.';
   }
 
-  return `No se pudieron subir las imágenes. Código: ${code}. ${message}`;
+  return `No se pudieron guardar las imágenes. Código: ${code}. ${message}`;
 }
 
 function sanitizeFileName(fileName: string): string {
   return fileName.replace(/[^a-zA-Z0-9._-]/g, '_');
+}
+
+function loadImage(file: File): Promise<HTMLImageElement> {
+  return new Promise((resolve, reject) => {
+    const objectUrl = URL.createObjectURL(file);
+    const image = new Image();
+
+    image.onload = () => {
+      URL.revokeObjectURL(objectUrl);
+      resolve(image);
+    };
+    image.onerror = () => {
+      URL.revokeObjectURL(objectUrl);
+      reject(new Error(`No se pudo procesar la imagen ${file.name}.`));
+    };
+    image.src = objectUrl;
+  });
+}
+
+function canvasToBlob(
+  canvas: HTMLCanvasElement,
+  mimeType: string,
+  quality: number
+): Promise<Blob> {
+  return new Promise((resolve, reject) => {
+    canvas.toBlob(
+      (blob) => {
+        if (blob) {
+          resolve(blob);
+        } else {
+          reject(new Error('El navegador no pudo comprimir la imagen.'));
+        }
+      },
+      mimeType,
+      quality
+    );
+  });
+}
+
+function blobToDataUrl(blob: Blob): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result as string);
+    reader.onerror = () => reject(reader.error || new Error('No se pudo leer la imagen comprimida.'));
+    reader.readAsDataURL(blob);
+  });
+}
+
+async function compressImageForFirestore(file: File): Promise<string> {
+  const image = await loadImage(file);
+  const largestSide = Math.max(image.naturalWidth, image.naturalHeight);
+  let scale = Math.min(1, MAX_IMAGE_DIMENSION / largestSide);
+  const qualityLevels = [0.82, 0.72, 0.62, 0.52, 0.42, 0.32];
+
+  for (let resizeAttempt = 0; resizeAttempt < 5; resizeAttempt += 1) {
+    const width = Math.max(1, Math.round(image.naturalWidth * scale));
+    const height = Math.max(1, Math.round(image.naturalHeight * scale));
+    const canvas = document.createElement('canvas');
+    canvas.width = width;
+    canvas.height = height;
+
+    const context = canvas.getContext('2d');
+    if (!context) {
+      throw new Error('El navegador no permite procesar la imagen seleccionada.');
+    }
+
+    context.drawImage(image, 0, 0, width, height);
+
+    for (const quality of qualityLevels) {
+      const blob = await canvasToBlob(canvas, 'image/webp', quality);
+      const dataUrl = await blobToDataUrl(blob);
+
+      if (dataUrl.length <= MAX_INLINE_DATA_URL_LENGTH) {
+        return dataUrl;
+      }
+    }
+
+    scale *= 0.75;
+  }
+
+  throw new Error(
+    `La imagen ${file.name} sigue siendo demasiado grande después de optimizarla. Prueba con otra imagen.`
+  );
 }
 
 export default function PhotoUploader({ dateId, onClose, onUploadSuccess }: PhotoUploaderProps) {
@@ -79,7 +164,7 @@ export default function PhotoUploader({ dateId, onClose, onUploadSuccess }: Phot
     setFiles((currentFiles) => currentFiles.filter((_, index) => index !== indexToRemove));
   };
 
-  const uploadFile = (file: File, index: number, progressByFile: number[]): Promise<string> =>
+  const uploadFileToStorage = (file: File, index: number, totalFiles: number): Promise<string> =>
     new Promise((resolve, reject) => {
       const randomId =
         typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
@@ -92,13 +177,10 @@ export default function PhotoUploader({ dateId, onClose, onUploadSuccess }: Phot
       uploadTask.on(
         'state_changed',
         (snapshot) => {
-          progressByFile[index] = snapshot.totalBytes
+          const fileProgress = snapshot.totalBytes
             ? snapshot.bytesTransferred / snapshot.totalBytes
             : 0;
-          const totalProgress =
-            progressByFile.reduce((sum, currentProgress) => sum + currentProgress, 0) /
-            progressByFile.length;
-          setProgress(totalProgress * 100);
+          setProgress(((index + fileProgress) / totalFiles) * 100);
         },
         reject,
         async () => {
@@ -122,15 +204,29 @@ export default function PhotoUploader({ dateId, onClose, onUploadSuccess }: Phot
 
     try {
       await ensureAuthenticated();
-      const progressByFile = files.map(() => 0);
-      const urls = await Promise.all(
-        files.map((file, index) => uploadFile(file, index, progressByFile))
-      );
+      const urls: string[] = [];
+
+      for (let index = 0; index < files.length; index += 1) {
+        const file = files[index];
+
+        try {
+          urls.push(await uploadFileToStorage(file, index, files.length));
+        } catch (storageError) {
+          console.warn(
+            'Firebase Storage no está disponible; se usará el respaldo optimizado en Firestore:',
+            storageError
+          );
+          setProgress(((index + 0.5) / files.length) * 100);
+          urls.push(await compressImageForFirestore(file));
+        }
+
+        setProgress(((index + 1) / files.length) * 100);
+      }
 
       await onUploadSuccess(urls);
       onClose();
     } catch (error) {
-      console.error('Error uploading files:', error);
+      console.error('Error saving files:', error);
       setErrorMessage(getFriendlyError(error));
     } finally {
       setUploading(false);
@@ -222,7 +318,7 @@ export default function PhotoUploader({ dateId, onClose, onUploadSuccess }: Phot
               ></div>
             </div>
             <p className="text-center text-sm text-gray-500 mt-2 flex items-center justify-center gap-2">
-              <Loader2 className="w-4 h-4 animate-spin" /> Subiendo {files.length}{' '}
+              <Loader2 className="w-4 h-4 animate-spin" /> Guardando {files.length}{' '}
               {files.length === 1 ? 'foto' : 'fotos'}... {Math.round(progress)}%
             </p>
           </div>
