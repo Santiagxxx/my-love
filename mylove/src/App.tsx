@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import './App.css';
 import DateForm from './components/DateForm';
 import DateList from './components/DateList';
@@ -15,6 +15,32 @@ import {
 } from 'firebase/firestore';
 
 const STORAGE_KEY = 'mylove-dates';
+const INLINE_PHOTO_PREFIX = 'data:image/';
+
+interface InlinePhotoRecord {
+  recordType: 'photo';
+  dateId: string;
+  dataUrl: string;
+  createdAt?: string;
+}
+
+function isInlinePhotoRecord(value: unknown): value is InlinePhotoRecord {
+  if (!value || typeof value !== 'object') {
+    return false;
+  }
+
+  const record = value as Partial<InlinePhotoRecord>;
+  return (
+    record.recordType === 'photo' &&
+    typeof record.dateId === 'string' &&
+    typeof record.dataUrl === 'string' &&
+    record.dataUrl.startsWith(INLINE_PHOTO_PREFIX)
+  );
+}
+
+function isInlinePhoto(url: string): boolean {
+  return url.startsWith(INLINE_PHOTO_PREFIX);
+}
 
 function getFirebaseError(error: unknown): { code: string; message: string } {
   if (error && typeof error === 'object') {
@@ -42,16 +68,30 @@ function getConnectionErrorMessage(error: unknown): string {
   return `No se pudo conectar con Firebase. Código: ${code}. ${message}`;
 }
 
+function createPhotoDocumentId(dateId: string, index: number): string {
+  const randomId =
+    typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+      ? crypto.randomUUID()
+      : Math.random().toString(36).slice(2);
+
+  return `photo_${dateId}_${Date.now()}_${index}_${randomId}`;
+}
+
 function App() {
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [dates, setDates] = useState<SavedDate[]>([]);
   const [editingDate, setEditingDate] = useState<SavedDate | null>(null);
   const [loading, setLoading] = useState(true);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const photoDocumentIdsByDateRef = useRef<Record<string, string[]>>({});
 
   const saveDatesToStorage = (items: SavedDate[]) => {
     if (typeof window !== 'undefined') {
-      window.localStorage.setItem(STORAGE_KEY, JSON.stringify(items));
+      const safeItems = items.map((item) => ({
+        ...item,
+        photos: (item.photos || []).filter((url) => !isInlinePhoto(url)),
+      }));
+      window.localStorage.setItem(STORAGE_KEY, JSON.stringify(safeItems));
     }
   };
 
@@ -98,9 +138,41 @@ function App() {
         unsubscribe = onSnapshot(
           collection(db, 'dates'),
           (querySnapshot) => {
-            const datesData: SavedDate[] = querySnapshot.docs.map((documentSnapshot) => ({
-              ...(documentSnapshot.data() as SavedDate),
-              id: documentSnapshot.id,
+            const dateRecords: SavedDate[] = [];
+            const inlinePhotosByDate: Record<string, string[]> = {};
+            const photoDocumentIdsByDate: Record<string, string[]> = {};
+
+            querySnapshot.docs.forEach((documentSnapshot) => {
+              const data = documentSnapshot.data() as unknown;
+
+              if (isInlinePhotoRecord(data)) {
+                inlinePhotosByDate[data.dateId] = [
+                  ...(inlinePhotosByDate[data.dateId] || []),
+                  data.dataUrl,
+                ];
+                photoDocumentIdsByDate[data.dateId] = [
+                  ...(photoDocumentIdsByDate[data.dateId] || []),
+                  documentSnapshot.id,
+                ];
+                return;
+              }
+
+              dateRecords.push({
+                ...(data as SavedDate),
+                id: documentSnapshot.id,
+              });
+            });
+
+            photoDocumentIdsByDateRef.current = photoDocumentIdsByDate;
+
+            const datesData = dateRecords.map((dateRecord) => ({
+              ...dateRecord,
+              photos: Array.from(
+                new Set([
+                  ...(dateRecord.photos || []),
+                  ...(inlinePhotosByDate[dateRecord.id] || []),
+                ])
+              ),
             }));
 
             const sortedDates = sortDates(datesData);
@@ -146,9 +218,14 @@ function App() {
       return updatedDates;
     });
 
+    const cloudDate: SavedDate = {
+      ...newDate,
+      photos: (newDate.photos || []).filter((url) => !isInlinePhoto(url)),
+    };
+
     try {
       await ensureAuthenticated();
-      await setDoc(doc(db, 'dates', newDate.id), newDate, { merge: true });
+      await setDoc(doc(db, 'dates', newDate.id), cloudDate, { merge: true });
       setErrorMessage(null);
     } catch (error) {
       console.error('Error guardando cita:', error);
@@ -163,6 +240,8 @@ function App() {
       return;
     }
 
+    const photoDocumentIds = photoDocumentIdsByDateRef.current[id] || [];
+
     setDates((currentDates) => {
       const updatedDates = currentDates.filter((currentDate) => currentDate.id !== id);
       saveDatesToStorage(updatedDates);
@@ -171,7 +250,12 @@ function App() {
 
     try {
       await ensureAuthenticated();
-      await deleteDoc(doc(db, 'dates', id));
+      await Promise.all([
+        deleteDoc(doc(db, 'dates', id)),
+        ...photoDocumentIds.map((photoDocumentId) =>
+          deleteDoc(doc(db, 'dates', photoDocumentId))
+        ),
+      ]);
       setErrorMessage(null);
     } catch (error) {
       console.error('Error eliminando cita:', error);
@@ -236,18 +320,42 @@ function App() {
       photos: Array.from(new Set([...(currentDate.photos || []), ...newPhotoUrls])),
     }));
 
+    const storageUrls = newPhotoUrls.filter((url) => !isInlinePhoto(url));
+    const inlinePhotoUrls = newPhotoUrls.filter(isInlinePhoto);
+
     try {
       await ensureAuthenticated();
-      await setDoc(
-        doc(db, 'dates', dateId),
-        { photos: arrayUnion(...newPhotoUrls) },
-        { merge: true }
-      );
+
+      const writes: Promise<void>[] = [];
+
+      if (storageUrls.length > 0) {
+        writes.push(
+          setDoc(
+            doc(db, 'dates', dateId),
+            { photos: arrayUnion(...storageUrls) },
+            { merge: true }
+          )
+        );
+      }
+
+      inlinePhotoUrls.forEach((dataUrl, index) => {
+        const photoDocumentId = createPhotoDocumentId(dateId, index);
+        writes.push(
+          setDoc(doc(db, 'dates', photoDocumentId), {
+            recordType: 'photo',
+            dateId,
+            dataUrl,
+            createdAt: new Date().toISOString(),
+          })
+        );
+      });
+
+      await Promise.all(writes);
       setErrorMessage(null);
     } catch (error) {
       console.error('Error guardando referencias de fotos:', error);
       setErrorMessage(
-        `Las imágenes se subieron, pero sus referencias no se sincronizaron. ${getConnectionErrorMessage(error)}`
+        `Las imágenes se prepararon, pero no se sincronizaron. ${getConnectionErrorMessage(error)}`
       );
     }
   };
